@@ -1,0 +1,48 @@
+:root {
+  --rost-navy: #16344e;
+  --rost-teal: #258b87;
+}
+
+.navbar {
+  border-top: 5px solid var(--rost-teal);
+}
+
+.navbar-brand {
+  color: var(--rost-navy) !important;
+  font-weight: 700;
+}
+
+.card {
+  border: 0;
+  box-shadow: 0 2px 12px rgb(22 52 78 / 10%);
+}
+
+.callout {
+  background: #e8f2f7;
+  border-left: 5px solid var(--rost-teal);
+  border-radius: 4px;
+  padding: 0.8rem 1rem;
+}
+
+.generate-row {
+  align-items: center;
+  display: flex;
+  gap: 1rem;
+  margin: 1rem 0;
+}
+
+.generate-row .alert {
+  margin: 0;
+}
+
+.global-controls {
+  align-items: center;
+  display: flex;
+  gap: 0.75rem;
+  padding-right: 0.75rem;
+}
+
+.global-controls .form-group {
+  margin: 0;
+  min-width: 7rem;
+}
