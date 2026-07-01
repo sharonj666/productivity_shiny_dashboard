@@ -342,6 +342,7 @@ def clean_productivity(
     sheet_name: str | None = None,
     column_map: dict[str, str] | None = None,
     year_filter: int | None = None,
+    species_default: str = SPECIES,
 ) -> tuple[list[dict[str, Any]], str, list[dict[str, str]]]:
     sheet_name, raw_rows = read_sheet(path, sheet_name)
     raw_rows = remap_columns(raw_rows, column_map)
@@ -358,17 +359,19 @@ def clean_productivity(
         status_raw = text(raw.get("Status", ""))
         status = status_raw.upper()
         status_valid = status in VALID_STATUS
+        species = text(raw.get("Species", "")) or text(species_default)
+        species = species.upper()
         plot = text(raw.get("PLOT", ""))
         nest_id = text(raw.get("Nest#", "")).upper()
         slot_label = text(raw.get("A or B chick", "")).upper()
         pfr_raw = text(raw.get("PFR", ""))
         pfr = normalize_pfr(pfr_raw)
         pfr_correction = ""
-        if year == 2025 and pfr == "XN1" and nest_id == "R1897":
+        if species == SPECIES and year == 2025 and pfr == "XN1" and nest_id == "R1897":
             pfr = ""
             pfr_correction = "excluded_wrong_nest_assignment;correct_nest=R897"
         location = text(raw.get("LOCATION", "")).upper()
-        nest_key = f"{year}|{SPECIES}|{plot}|{nest_id}"
+        nest_key = f"{year}|{species}|{plot}|{nest_id}"
         slot_key = f"{nest_key}|{slot_label}"
         flags: list[str] = []
         if date_flag in {"missing", "invalid", "repaired_date_prefix"}:
@@ -399,7 +402,7 @@ def clean_productivity(
         record = {
             "productivity_record_id": f"PROD-{source_row:05d}",
             "year": year,
-            "species": SPECIES,
+            "species": species,
             "observation_date": iso(observed_date),
             "date_raw": raw.get("DATE", ""),
             "date_parse_flag": date_flag,
@@ -459,8 +462,9 @@ def clean_resights(
     cleaned: list[dict[str, Any]] = []
     qc: list[dict[str, str]] = []
     for raw in raw_rows:
-        if text(raw.get("Species", "")).upper() != SPECIES:
-            continue
+        species = text(raw.get("Species", "")).upper()
+        if not species:
+            species = SPECIES
         observed_date, date_flag = parse_excel_date(raw.get("Favorite Date", ""))
         if observed_date is None:
             continue
@@ -483,7 +487,7 @@ def clean_resights(
         record = {
             "resight_record_id": f"RESIGHT-{source_row:05d}",
             "year": year,
-            "species": SPECIES,
+            "species": species,
             "observation_date": iso(observed_date),
             "date_raw": raw.get("Favorite Date", ""),
             "date_parse_flag": date_flag,
@@ -576,21 +580,21 @@ def derive_tables(
                 )
             )
 
-    resights_by_pfr: dict[tuple[int, str], list[dict[str, Any]]] = defaultdict(list)
+    resights_by_pfr: dict[tuple[int, str, str], list[dict[str, Any]]] = defaultdict(list)
     for row in resights:
         if row["eligible_for_verification"] and row["combo"]:
-            resights_by_pfr[(int(row["year"]), row["combo"])].append(row)
+            resights_by_pfr[(int(row["year"]), row["species"], row["combo"])].append(row)
 
-    pfr_to_slots: dict[tuple[int, str], set[str]] = defaultdict(set)
+    pfr_to_slots: dict[tuple[int, str, str], set[str]] = defaultdict(set)
     for row in productivity:
         if row["pfr"]:
-            pfr_to_slots[(int(row["year"]), row["pfr"])].add(row["slot_key"])
-    for (year, pfr), slots in pfr_to_slots.items():
+            pfr_to_slots[(int(row["year"]), row["species"], row["pfr"])].add(row["slot_key"])
+    for (year, species, pfr), slots in pfr_to_slots.items():
         if len(slots) > 1:
             qc.append(
                 qc_record(
                     "chick_summary",
-                    pfr,
+                    f"{year}|{species}|{pfr}",
                     "pfr_multiple_slots",
                     "",
                     ";".join(sorted(slots)),
@@ -603,6 +607,7 @@ def derive_tables(
         valid_dates = [row["_date"] for row in records if row["_date"]]
         plot = records[0]["plot"]
         year = int(records[0]["year"])
+        species = records[0]["species"]
         nest_key = records[0]["nest_key"]
         nest_id = records[0]["nest_id"]
         slot_label = records[0]["slot_label"]
@@ -663,12 +668,12 @@ def derive_tables(
         last_pre_fledge = max(pre_fledge_dates) if pre_fledge_dates else None
 
         pfr_ambiguous = bool(
-            pfr and len(pfr_to_slots.get((year, pfr), set())) > 1
+            pfr and len(pfr_to_slots.get((year, species, pfr), set())) > 1
         )
         eligible_resights = (
             []
             if pfr_ambiguous
-            else list(resights_by_pfr.get((year, pfr), []))
+            else list(resights_by_pfr.get((year, species, pfr), []))
         )
         resight_yes = any(row["fledged"] == "yes" for row in eligible_resights)
         resight_no = any(row["fledged"] == "no" for row in eligible_resights)
@@ -735,7 +740,7 @@ def derive_tables(
             chick_flags.append("state_hatch_without_status_h")
         if valid_h_dates and not chick_dates:
             chick_flags.append("status_h_without_chick_state")
-        if pfr and (year, pfr) not in resights_by_pfr:
+        if pfr and (year, species, pfr) not in resights_by_pfr:
             chick_flags.append("pfr_without_resight")
         if pfr_ambiguous:
             chick_flags.append("ambiguous_pfr_multiple_slots")
@@ -758,9 +763,9 @@ def derive_tables(
             qc.append(qc_record("chick_summary", slot_key, flag, "", flag))
 
         chick_row = {
-            "chick_id": pfr or slot_key,
+            "chick_id": f"{year}|{species}|{pfr}" if pfr else slot_key,
             "year": year,
-            "species": SPECIES,
+            "species": species,
             "plot": plot,
             "nest_id": nest_id,
             "nest_key": nest_key,
@@ -791,7 +796,7 @@ def derive_tables(
         chronology_rows.append(
             {
                 "year": year,
-                "species": SPECIES,
+                "species": species,
                 "plot": plot,
                 "nest_id": nest_id,
                 "nest_key": nest_key,
@@ -848,7 +853,7 @@ def derive_tables(
         nest_rows.append(
             {
                 "year": int(records[0]["year"]),
-                "species": SPECIES,
+                "species": records[0]["species"],
                 "plot": plots[0] if len(plots) == 1 else ";".join(plots),
                 "nest_id": records[0]["nest_id"],
                 "nest_key": nest_key,
@@ -868,23 +873,24 @@ def derive_tables(
         )
 
     summary_rows: list[dict[str, Any]] = []
-    groups: list[tuple[int, str, list[dict[str, Any]], list[dict[str, Any]]]] = []
-    for year in sorted({int(row["year"]) for row in nest_rows if int(row["year"])}):
-        year_nests = [row for row in nest_rows if int(row["year"]) == year]
-        year_chicks = [row for row in chick_rows if int(row["year"]) == year]
-        groups.append((year, "Overall", year_nests, year_chicks))
+    groups: list[tuple[int, str, str, list[dict[str, Any]], list[dict[str, Any]]]] = []
+    year_species = sorted({(int(row["year"]), row["species"]) for row in nest_rows if int(row["year"])})
+    for year, species in year_species:
+        year_nests = [row for row in nest_rows if int(row["year"]) == year and row["species"] == species]
+        year_chicks = [row for row in chick_rows if int(row["year"]) == year and row["species"] == species]
+        groups.append((year, species, "Overall", year_nests, year_chicks))
         for plot in sorted({row["plot"] for row in year_nests}):
             groups.append(
                 (
-                    year,
+                    year, species,
                     plot,
                     [row for row in year_nests if row["plot"] == plot],
                     [row for row in year_chicks if row["plot"] == plot],
                 )
             )
-    for year, group, group_nests, group_chicks in groups:
+    for year, species, group, group_nests, group_chicks in groups:
         summary_rows.append(
-            {"year": year, **descriptive_rows(
+            {"year": year, "species": species, **descriptive_rows(
                 [float(row["clutch_size"]) for row in group_nests],
                 group,
                 "clutch_size",
@@ -895,10 +901,10 @@ def derive_tables(
         verified = sum(bool(row["verified_fledged"]) for row in hatched)
         dead = sum(bool(row["known_dead"]) for row in hatched)
         summary_rows.append(
-            {"year": year, **proportion_row(verified, len(hatched), group, "apparent_verified_fledge_rate")}
+            {"year": year, "species": species, **proportion_row(verified, len(hatched), group, "apparent_verified_fledge_rate")}
         )
         summary_rows.append(
-            {"year": year, **proportion_row(
+            {"year": year, "species": species, **proportion_row(
                 verified,
                 verified + dead,
                 group,
@@ -907,7 +913,7 @@ def derive_tables(
         )
         summary_rows.append(
             {
-                "year": year, **descriptive_rows(
+                "year": year, "species": species, **descriptive_rows(
                     [float(row["hatched_chicks"]) for row in group_nests],
                     group,
                     "hatched_chicks_per_nest",
@@ -917,7 +923,7 @@ def derive_tables(
         )
         summary_rows.append(
             {
-                "year": year, **descriptive_rows(
+                "year": year, "species": species, **descriptive_rows(
                     [float(row["verified_fledglings"]) for row in group_nests],
                     group,
                     "verified_fledglings_per_nest",
@@ -927,13 +933,14 @@ def derive_tables(
         )
 
     chronology_summary_rows: list[dict[str, Any]] = []
-    chronology_groups: list[tuple[int, str, list[dict[str, Any]]]] = []
-    for year in sorted({int(row["year"]) for row in chronology_rows if int(row["year"])}):
-        year_rows = [row for row in chronology_rows if int(row["year"]) == year]
-        chronology_groups.append((year, "Overall", year_rows))
+    chronology_groups: list[tuple[int, str, str, list[dict[str, Any]]]] = []
+    chronology_year_species = sorted({(int(row["year"]), row["species"]) for row in chronology_rows if int(row["year"])})
+    for year, species in chronology_year_species:
+        year_rows = [row for row in chronology_rows if int(row["year"]) == year and row["species"] == species]
+        chronology_groups.append((year, species, "Overall", year_rows))
         for plot in sorted({row["plot"] for row in year_rows}):
             chronology_groups.append(
-                (year, plot, [row for row in year_rows if row["plot"] == plot])
+                (year, species, plot, [row for row in year_rows if row["plot"] == plot])
             )
     date_fields = [
         ("lay", "first_observed", "lay_first_observed"),
@@ -943,7 +950,7 @@ def derive_tables(
         ("fledge", "first_observed", "fledge_first_observed"),
         ("fledge", "midpoint", "fledge_midpoint"),
     ]
-    for year, group, group_rows in chronology_groups:
+    for year, species, group, group_rows in chronology_groups:
         for event, method, field in date_fields:
             values = [
                 datetime.strptime(row[field], "%Y-%m-%d").date()
@@ -951,24 +958,24 @@ def derive_tables(
                 if row[field]
             ]
             chronology_summary_rows.append(
-                {"year": year, **date_summary_row(values, group, event, method)}
+                {"year": year, "species": species, **date_summary_row(values, group, event, method)}
             )
 
     unmatched_resight_pfr = sorted(
         {
-            row["combo"]
+            (int(row["year"]), row["species"], row["combo"])
             for row in resights
             if row["eligible_for_verification"]
             and row["combo"]
             and row["age"] in {"", "Chick"}
-            and (int(row["year"]), row["combo"]) not in pfr_to_slots
+            and (int(row["year"]), row["species"], row["combo"]) not in pfr_to_slots
         }
     )
-    for pfr in unmatched_resight_pfr:
+    for year, species, pfr in unmatched_resight_pfr:
         qc.append(
             qc_record(
                 "cleaned_resight_observations",
-                pfr,
+                f"{year}|{species}|{pfr}",
                 "resight_without_productivity_pfr",
                 "",
                 pfr,
@@ -1118,6 +1125,7 @@ CHRONOLOGY_FIELDS = [
 
 SUMMARY_FIELDS = [
     "year",
+    "species",
     "group",
     "metric",
     "unit",
@@ -1135,6 +1143,7 @@ SUMMARY_FIELDS = [
 
 CHRONOLOGY_SUMMARY_FIELDS = [
     "year",
+    "species",
     "group",
     "event",
     "method",
@@ -1150,7 +1159,7 @@ CHRONOLOGY_SUMMARY_FIELDS = [
     "latest",
 ]
 
-QC_FIELDS = ["year", "layer", "record_id", "issue", "source_row", "detail"]
+QC_FIELDS = ["year", "species", "layer", "record_id", "issue", "source_row", "detail"]
 
 
 def assign_qc_years(
@@ -1162,6 +1171,12 @@ def assign_qc_years(
         row["productivity_record_id"]: int(row["year"]) for row in productivity
     }
     resight_years = {row["resight_record_id"]: int(row["year"]) for row in resights}
+    productivity_species = {
+        row["productivity_record_id"]: row["species"] for row in productivity
+    }
+    resight_species = {
+        row["resight_record_id"]: row["species"] for row in resights
+    }
     for row in qc:
         year_match = re.search(
             r"(20\d{2})\|", row["record_id"] + " " + row["detail"]
@@ -1170,6 +1185,12 @@ def assign_qc_years(
             productivity_years.get(row["record_id"])
             or resight_years.get(row["record_id"])
             or (int(year_match.group(1)) if year_match else "")
+        )
+        key_match = re.search(r"20\d{2}\|([^|]+)\|", row["record_id"] + " " + row["detail"])
+        row["species"] = (
+            productivity_species.get(row["record_id"])
+            or resight_species.get(row["record_id"])
+            or (key_match.group(1) if key_match else "")
         )
 
 
@@ -1180,10 +1201,11 @@ def analyze_workbooks(
     resight_path: Path | None = None,
     resight_sheet: str | None = None,
     resight_map: dict[str, str] | None = None,
+    species_default: str = SPECIES,
 ) -> dict[str, list[dict[str, Any]]]:
     """Analyze uploaded workbooks without writing outputs to disk."""
     productivity, _, productivity_qc = clean_productivity(
-        productivity_path, productivity_sheet, productivity_map
+        productivity_path, productivity_sheet, productivity_map, species_default=species_default
     )
     invalid_date_qc = [
         qc_record(

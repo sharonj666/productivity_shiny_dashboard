@@ -46,9 +46,12 @@ Stop the app with `Ctrl+C` in the terminal.
 2. Optionally upload a resight `.xlsx` workbook.
 3. Select the relevant worksheet in each workbook.
 4. Review or change the column mappings.
-5. Confirm the detected analysis years.
-6. Select **Generate analysis**.
-7. Use the year selector to explore each season separately.
+5. Map a species column, or enter one species label for the whole workbook.
+6. Confirm the detected analysis years.
+7. Select **Generate analysis**.
+8. Use the year and species selectors to explore a single season.
+9. Use **Compare** for same-species cross-year or same-year cross-species charts.
+10. Use **Downloads** to export a selected PNG/CSV or a ZIP of all results.
 
 Uploads are temporary and remain isolated to the browser session. The app does
 not save uploaded workbooks or generated analysis tables.

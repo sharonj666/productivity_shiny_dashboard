@@ -26,14 +26,25 @@ class AppData:
     def years(self) -> list[int]:
         return sorted(int(year) for year in self.chicks["year"].dropna().unique())
 
-    def for_year(self, year: int) -> "AppData":
+    @property
+    def species(self) -> list[str]:
+        return sorted(str(value) for value in self.chicks["species"].dropna().unique())
+
+    def for_year(self, year: int, species: str | None = None) -> "AppData":
         def subset(frame: pd.DataFrame) -> pd.DataFrame:
             if "year" not in frame.columns:
                 return frame.copy()
             years = pd.to_numeric(frame["year"], errors="coerce")
             if frame is self.qc:
-                return frame.loc[(years == int(year)) | years.isna()].copy()
-            return frame.loc[years == int(year)].copy()
+                mask = (years == int(year)) | years.isna()
+                if species is not None and "species" in frame.columns:
+                    species_values = frame["species"].fillna("").astype(str)
+                    mask &= species_values.eq(species) | species_values.eq("")
+                return frame.loc[mask].copy()
+            mask = years == int(year)
+            if species is not None and "species" in frame.columns:
+                mask &= frame["species"].astype(str).eq(species)
+            return frame.loc[mask].copy()
 
         return AppData(
             summary=subset(self.summary),
@@ -41,7 +52,7 @@ class AppData:
             nests=subset(self.nests),
             chicks=subset(self.chicks),
             chronology=subset(self.chronology),
-            qc=self.qc.copy(),
+            qc=subset(self.qc),
         )
 
     @property
@@ -85,11 +96,13 @@ FILES = {
 }
 
 REQUIRED_COLUMNS = {
-    "summary": {"group", "metric", "mean", "numerator", "denominator"},
-    "chronology_summary": {"group", "event", "method", "median", "n"},
-    "nests": {"plot", "nest_id", "clutch_size", "hatched_chicks", "verified_fledglings"},
+    "summary": {"year", "species", "group", "metric", "mean", "numerator", "denominator"},
+    "chronology_summary": {"year", "species", "group", "event", "method", "median", "n"},
+    "nests": {"year", "species", "plot", "nest_id", "clutch_size", "hatched_chicks", "verified_fledglings"},
     "chicks": {
         "plot",
+        "year",
+        "species",
         "nest_id",
         "slot_label",
         "pfr",
@@ -99,7 +112,7 @@ REQUIRED_COLUMNS = {
         "fledge_verification_basis",
         "outcome",
     },
-    "chronology": {"plot", "lay_first_observed", "hatch_midpoint", "fledge_midpoint"},
+    "chronology": {"year", "species", "plot", "lay_first_observed", "hatch_midpoint", "fledge_midpoint"},
     "qc": {"layer", "record_id", "issue", "detail"},
 }
 

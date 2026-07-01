@@ -5,11 +5,14 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import sys
+from io import BytesIO
+import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 os.environ.setdefault("MPLCONFIGDIR", str(ROOT / "outputs" / ".matplotlib"))
 
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 import pandas as pd
 from shiny import App, reactive, render, req, ui
 
@@ -29,6 +32,7 @@ APP_CSS = Path(__file__).with_name("www").joinpath("styles.css").read_text()
 
 PRODUCTIVITY_FIELDS = {
     "date": ("DATE", True),
+    "species": ("Species", False),
     "plot": ("PLOT", True),
     "nest": ("Nest#", True),
     "slot": ("A or B chick", True),
@@ -84,6 +88,140 @@ def plot_choices(data: AppData) -> list[str]:
     return ["Overall", *sorted(data.chicks["plot"].dropna().unique())]
 
 
+def safe_name(value: object) -> str:
+    return "".join(c if c.isalnum() else "_" for c in str(value)).strip("_")
+
+
+def empty_figure(message: str, figsize=(6, 4)):
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.text(0.5, 0.5, message, ha="center", va="center", transform=ax.transAxes)
+    ax.set_axis_off()
+    fig.tight_layout()
+    return fig
+
+
+def outcome_figure(chicks: pd.DataFrame):
+    order = ["verified_fledged", "known_dead", "unresolved", "not_hatched"]
+    labels = ["Verified fledged", "Known dead", "Unresolved", "Not hatched"]
+    counts = chicks["outcome"].value_counts().reindex(order, fill_value=0)
+    fig, ax = plt.subplots(figsize=(7, 3.8))
+    bars = ax.bar(labels, counts, color=["#3e8e41", "#b54137", "#da9e2c", "#78909c"])
+    ax.bar_label(bars)
+    ax.set_ylabel("Chick slots")
+    ax.tick_params(axis="x", rotation=20)
+    fig.tight_layout()
+    return fig
+
+
+def nest_box_figure(nests: pd.DataFrame):
+    if nests.empty:
+        return empty_figure("No nest data")
+    fig, ax = plt.subplots(figsize=(7, 3.8))
+    columns = ["clutch_size", "hatched_chicks", "verified_fledglings"]
+    ax.boxplot(
+        [nests[column].dropna() for column in columns],
+        tick_labels=["Clutch size", "Hatched", "Fledged"],
+    )
+    ax.set_ylabel("Count per nest")
+    fig.tight_layout()
+    return fig
+
+
+def clutch_figure(nests: pd.DataFrame, style: str):
+    values = nests["clutch_size"].dropna()
+    if values.empty:
+        return empty_figure("No clutch-size data", (5.5, 4))
+    fig, ax = plt.subplots(figsize=(5.5, 4))
+    if style == "Box":
+        ax.boxplot(values, tick_labels=["Clutch size"])
+        ax.set_ylabel("Eggs per nest")
+    else:
+        counts = values.astype(int).value_counts().sort_index()
+        bars = ax.bar(counts.index.astype(str), counts, color="#2670a0")
+        ax.bar_label(bars)
+        ax.set(xlabel="Clutch size", ylabel="Nests")
+    fig.tight_layout()
+    return fig
+
+
+def nest_productivity_figure(nests: pd.DataFrame, style: str):
+    columns = ["hatched_chicks", "verified_fledglings"]
+    labels = ["Hatched chicks", "Verified fledglings"]
+    if nests.empty:
+        return empty_figure("No productivity data", (5.5, 4))
+    fig, ax = plt.subplots(figsize=(5.5, 4))
+    if style == "Box":
+        ax.boxplot([nests[column].dropna() for column in columns], tick_labels=labels)
+        ax.set_ylabel("Count per nest")
+    else:
+        means = [nests[column].mean() for column in columns]
+        bars = ax.bar(labels, means, color=["#2670a0", "#3e8e41"])
+        ax.bar_label(bars, fmt="%.2f")
+        ax.set_ylabel("Mean per nest")
+    fig.tight_layout()
+    return fig
+
+
+def chronology_figure(frame: pd.DataFrame, method: str, style: str):
+    columns = {
+        "Lay": f"lay_{method}",
+        "Hatch": f"hatch_{method}",
+        "Fledge": f"fledge_{method}",
+    }
+    series = {
+        label: pd.to_datetime(frame[column], errors="coerce").dropna()
+        for label, column in columns.items()
+    }
+    if not any(not values.empty for values in series.values()):
+        return empty_figure("No chronology data", (9, 4.5))
+    fig, ax = plt.subplots(figsize=(9, 4.5))
+    if style == "Cumulative":
+        for label, dates in series.items():
+            dates = dates.sort_values()
+            if not dates.empty:
+                ax.step(dates, range(1, len(dates) + 1), where="post", label=label)
+        ax.set(xlabel="Date", ylabel="Cumulative events")
+        ax.legend()
+    elif style == "Box":
+        present = [(label, dates.map(mdates.date2num)) for label, dates in series.items() if not dates.empty]
+        ax.boxplot([values for _, values in present], tick_labels=[label for label, _ in present])
+        ax.yaxis_date()
+        ax.set_ylabel("Event date")
+    else:
+        medians = [(label, dates.median()) for label, dates in series.items() if not dates.empty]
+        bars = ax.bar(
+            [label for label, _ in medians],
+            [mdates.date2num(value) for _, value in medians],
+            color=["#da9e2c", "#2670a0", "#3e8e41"][: len(medians)],
+        )
+        ax.bar_label(bars, labels=[value.strftime("%b %d") for _, value in medians])
+        ax.yaxis_date()
+        ax.set_ylabel("Median event date")
+    fig.autofmt_xdate()
+    fig.tight_layout()
+    return fig
+
+
+def comparison_figure(frame: pd.DataFrame, style: str, label: str, is_date: bool = False):
+    if frame.empty or frame["group"].nunique() < 2:
+        return empty_figure("Select at least two groups with data", (9, 4.8))
+    groups = list(dict.fromkeys(frame["group"]))
+    values = [frame.loc[frame["group"] == group, "value"].dropna() for group in groups]
+    fig, ax = plt.subplots(figsize=(9, 4.8))
+    if style == "Box":
+        ax.boxplot(values, tick_labels=groups)
+    else:
+        means = [value.mean() for value in values]
+        bars = ax.bar(groups, means, color="#2670a0")
+        ax.bar_label(bars, fmt="%.2f")
+    ax.set_ylabel(label)
+    if is_date:
+        ticks = ax.get_yticks()
+        ax.set_yticks(ticks, [pd.Timestamp(2024, 1, 1).__add__(pd.Timedelta(days=max(0, tick - 1))).strftime("%b %d") for tick in ticks])
+    fig.tight_layout()
+    return fig
+
+
 app_ui = ui.page_navbar(
     ui.nav_panel(
         "Upload data",
@@ -109,6 +247,7 @@ app_ui = ui.page_navbar(
             ui.card(
                 ui.card_header("2. Map productivity columns"),
                 ui.output_ui("productivity_mapping_ui"),
+                ui.output_ui("species_fallback_ui"),
                 ui.output_ui("detected_years_preview"),
             ),
             col_widths=(4, 8),
@@ -130,14 +269,18 @@ app_ui = ui.page_navbar(
         ui.output_ui("overview_cards"),
         ui.layout_columns(
             ui.card(ui.card_header("Chick outcomes"), ui.output_plot("outcome_plot")),
+            ui.card(ui.card_header("Nest distributions"), ui.output_plot("overview_box_plot")),
             ui.card(ui.card_header("Fledging rates"), ui.output_ui("rate_summary")),
-            col_widths=(7, 5),
+            col_widths=(4, 4, 4),
         ),
     ),
     ui.nav_panel(
         "Productivity",
         ui.layout_sidebar(
-            ui.sidebar(ui.output_ui("productivity_plot_control")),
+            ui.sidebar(
+                ui.output_ui("productivity_plot_control"),
+                ui.input_select("productivity_chart_style", "Chart style", ["Bar", "Box"]),
+            ),
             ui.layout_columns(
                 ui.card(ui.card_header("Clutch size"), ui.output_plot("clutch_plot")),
                 ui.card(
@@ -158,12 +301,60 @@ app_ui = ui.page_navbar(
                     "Date method",
                     {"midpoint": "Interval midpoint", "first_observed": "First observed"},
                 ),
+                ui.input_select(
+                    "chronology_chart_style",
+                    "Chart style",
+                    ["Cumulative", "Bar", "Box"],
+                ),
             ),
             ui.card(
-                ui.card_header("Cumulative breeding chronology"),
+                ui.card_header(ui.output_text("chronology_chart_title")),
                 ui.output_plot("chronology_plot"),
             ),
             ui.output_ui("chronology_medians"),
+        ),
+    ),
+    ui.nav_panel(
+        "Compare",
+        ui.layout_sidebar(
+            ui.sidebar(
+                ui.input_radio_buttons(
+                    "comparison_mode",
+                    "Comparison type",
+                    {
+                        "years": "Same species across years",
+                        "species": "Same year across species",
+                    },
+                ),
+                ui.output_ui("comparison_selectors"),
+                ui.output_ui("comparison_plot_filter_ui"),
+                ui.input_select(
+                    "comparison_metric",
+                    "Metric",
+                    {
+                        "clutch_size": "Clutch size",
+                        "hatched_chicks": "Hatched chicks per nest",
+                        "verified_fledglings": "Verified fledglings per nest",
+                        "fledge_rate": "Verified fledging rate",
+                        "lay_midpoint": "Lay date",
+                        "hatch_midpoint": "Hatch date",
+                        "fledge_midpoint": "Fledge date",
+                    },
+                ),
+                ui.input_select("comparison_chart_style", "Chart style", ["Bar", "Box"]),
+            ),
+            ui.output_ui("comparison_status"),
+            ui.card(ui.card_header("Comparison"), ui.output_plot("comparison_plot")),
+        ),
+    ),
+    ui.nav_panel(
+        "Downloads",
+        ui.card(
+            ui.card_header("Download current analysis"),
+            ui.output_ui("download_selector_ui"),
+            ui.download_button("download_selected", "Download selected"),
+            ui.download_button("download_all", "Download all charts and CSVs"),
+            ui.p("The ZIP includes all dashboard figures, analysis tables, and a comparison export when the current comparison is valid.", class_="callout"),
         ),
     ),
     ui.nav_panel(
@@ -308,6 +499,17 @@ def server(input, output, session):
         return mapping_ui("prod", PRODUCTIVITY_FIELDS, productivity_headers())
 
     @render.ui
+    def species_fallback_ui():
+        if not productivity_headers() or input.prod_map_species():
+            return None
+        return ui.input_text(
+            "productivity_species_default",
+            "Species for all productivity rows *",
+            value="ROST",
+            placeholder="For example: ROST",
+        )
+
+    @render.ui
     def detected_years_preview():
         if not productivity_headers():
             return None
@@ -365,6 +567,11 @@ def server(input, output, session):
             if productivity_path is None:
                 raise ValueError("Upload a productivity workbook")
             productivity_map = collect_map("prod", PRODUCTIVITY_FIELDS)
+            species_default = ""
+            if "Species" not in productivity_map:
+                species_default = input.productivity_species_default().strip()
+                if not species_default:
+                    raise ValueError("Enter a species label or map a Species column")
             resight_path = upload_path(input.resight_file())
             resight_map = (
                 collect_map("res", RESIGHT_FIELDS) if resight_path is not None else None
@@ -376,15 +583,25 @@ def server(input, output, session):
                 resight_path=resight_path,
                 resight_sheet=input.resight_sheet() if resight_path else None,
                 resight_map=resight_map,
+                species_default=species_default,
             )
             data = from_analysis(result)
             if not data.years:
                 raise ValueError("No usable analysis years were detected")
             analysis_data.set(data)
+            latest_year = data.years[-1]
+            latest_species = sorted(
+                data.chicks.loc[data.chicks["year"].eq(latest_year), "species"].unique()
+            )
             ui.update_select(
                 "selected_year",
                 choices=[str(year) for year in data.years],
-                selected=str(data.years[-1]),
+                selected=str(latest_year),
+            )
+            ui.update_select(
+                "selected_species",
+                choices=latest_species,
+                selected=latest_species[0],
             )
             success_message.set(
                 f"Analysis ready for {len(data.years)} year(s): "
@@ -422,15 +639,35 @@ def server(input, output, session):
                 [str(year) for year in analysis_data().years],
                 selected=str(analysis_data().years[-1]),
             ),
+            ui.input_select(
+                "selected_species",
+                "Species",
+                sorted(
+                    analysis_data().chicks.loc[
+                        analysis_data().chicks["year"].eq(analysis_data().years[-1]),
+                        "species",
+                    ].unique()
+                ),
+            ),
             ui.input_action_button("reset_data", "Upload different data", class_="btn-outline-light"),
             class_="global-controls",
         )
 
+    @reactive.effect
+    @reactive.event(input.selected_year)
+    def _update_species_for_year():
+        data = analysis_data()
+        req(data, input.selected_year())
+        year = int(input.selected_year())
+        choices = sorted(data.chicks.loc[data.chicks["year"].eq(year), "species"].unique())
+        selected = input.selected_species() if input.selected_species() in choices else choices[0]
+        ui.update_select("selected_species", choices=choices, selected=selected)
+
     @reactive.calc
     def current_data() -> AppData:
         data = analysis_data()
-        req(data, input.selected_year())
-        return data.for_year(int(input.selected_year()))
+        req(data, input.selected_year(), input.selected_species())
+        return data.for_year(int(input.selected_year()), input.selected_species())
 
     @render.ui
     def productivity_plot_control():
@@ -471,16 +708,11 @@ def server(input, output, session):
 
     @render.plot
     def outcome_plot():
-        order = ["verified_fledged", "known_dead", "unresolved", "not_hatched"]
-        labels = ["Verified fledged", "Known dead", "Unresolved", "Not hatched"]
-        counts = overview_chicks()["outcome"].value_counts().reindex(order, fill_value=0)
-        fig, ax = plt.subplots(figsize=(7, 3.8))
-        bars = ax.bar(labels, counts, color=["#3e8e41", "#b54137", "#da9e2c", "#78909c"])
-        ax.bar_label(bars)
-        ax.set_ylabel("Chick slots")
-        ax.tick_params(axis="x", rotation=20)
-        fig.tight_layout()
-        return fig
+        return outcome_figure(overview_chicks())
+
+    @render.plot
+    def overview_box_plot():
+        return nest_box_figure(current_data().nests)
 
     def metric_value(group: str, metric: str) -> pd.Series:
         rows = current_data().summary.loc[
@@ -517,24 +749,11 @@ def server(input, output, session):
 
     @render.plot
     def clutch_plot():
-        counts = productivity_nests()["clutch_size"].dropna().astype(int).value_counts().sort_index()
-        fig, ax = plt.subplots(figsize=(5.5, 4))
-        bars = ax.bar(counts.index.astype(str), counts, color="#2670a0")
-        ax.bar_label(bars)
-        ax.set(xlabel="Egg-bearing slots", ylabel="Nests")
-        fig.tight_layout()
-        return fig
+        return clutch_figure(productivity_nests(), input.productivity_chart_style())
 
     @render.plot
     def nest_productivity_plot():
-        nests = productivity_nests()
-        means = [nests["hatched_chicks"].mean(), nests["verified_fledglings"].mean()]
-        fig, ax = plt.subplots(figsize=(5.5, 4))
-        bars = ax.bar(["Hatched chicks", "Verified fledglings"], means, color=["#2670a0", "#3e8e41"])
-        ax.bar_label(bars, fmt="%.2f")
-        ax.set_ylabel("Mean per nest")
-        fig.tight_layout()
-        return fig
+        return nest_productivity_figure(productivity_nests(), input.productivity_chart_style())
 
     @render.plot
     def chronology_plot():
@@ -543,17 +762,11 @@ def server(input, output, session):
         frame = current_data().chronology
         if selected != "Overall":
             frame = frame.loc[frame["plot"] == selected]
-        columns = {"Lay": f"lay_{method}", "Hatch": f"hatch_{method}", "Fledge": f"fledge_{method}"}
-        fig, ax = plt.subplots(figsize=(9, 4.5))
-        for label, column in columns.items():
-            dates = pd.to_datetime(frame[column], errors="coerce").dropna().sort_values()
-            if not dates.empty:
-                ax.step(dates, range(1, len(dates) + 1), where="post", label=label)
-        ax.set(xlabel="Date", ylabel="Cumulative events")
-        ax.legend()
-        fig.autofmt_xdate()
-        fig.tight_layout()
-        return fig
+        return chronology_figure(frame, method, input.chronology_chart_style())
+
+    @render.text
+    def chronology_chart_title():
+        return f"{input.chronology_chart_style()} breeding chronology"
 
     @render.ui
     def chronology_medians():
@@ -574,6 +787,126 @@ def server(input, output, session):
                 for row in rows.itertuples()
             ],
             col_widths=(4, 4, 4),
+        )
+
+    @render.ui
+    def comparison_selectors():
+        data = analysis_data()
+        req(data)
+        if input.comparison_mode() == "species":
+            return ui.TagList(
+                ui.input_select(
+                    "comparison_year",
+                    "Year",
+                    [str(year) for year in data.years],
+                    selected=str(data.years[-1]),
+                ),
+                ui.input_select(
+                    "comparison_species",
+                    "Species (choose at least two)",
+                    data.species,
+                    selected=data.species,
+                    multiple=True,
+                ),
+            )
+        return ui.TagList(
+            ui.input_select(
+                "comparison_single_species",
+                "Species",
+                data.species,
+                selected=data.species[0],
+            ),
+            ui.input_select(
+                "comparison_years",
+                "Years (choose at least two)",
+                [str(year) for year in data.years],
+                selected=[str(year) for year in data.years],
+                multiple=True,
+            ),
+        )
+
+    @render.ui
+    def comparison_plot_filter_ui():
+        data = analysis_data()
+        req(data)
+        plots = sorted(data.nests["plot"].dropna().astype(str).unique())
+        locations = sorted(data.nests["location"].dropna().astype(str).unique())
+        locations = [value for value in locations if value]
+        choices = {"Overall": "Overall"}
+        choices.update({f"plot:{value}": f"Plot: {value}" for value in plots})
+        choices.update({f"location:{value}": f"Location: {value}" for value in locations})
+        return ui.input_select("comparison_filter", "Plot/location", choices)
+
+    def comparison_groups() -> tuple[str, list[str]]:
+        if input.comparison_mode() == "species":
+            selected = list(input.comparison_species() or [])
+            return "species", selected
+        selected = [str(value) for value in (input.comparison_years() or [])]
+        return "year", selected
+
+    @reactive.calc
+    def comparison_data() -> pd.DataFrame:
+        data = analysis_data()
+        req(data)
+        group_column, selected = comparison_groups()
+        metric = input.comparison_metric()
+        if group_column == "species":
+            year = int(input.comparison_year())
+            nests = data.nests.loc[pd.to_numeric(data.nests["year"], errors="coerce").eq(year) & data.nests["species"].isin(selected)].copy()
+            chicks = data.chicks.loc[pd.to_numeric(data.chicks["year"], errors="coerce").eq(year) & data.chicks["species"].isin(selected)].copy()
+            chronology = data.chronology.loc[pd.to_numeric(data.chronology["year"], errors="coerce").eq(year) & data.chronology["species"].isin(selected)].copy()
+        else:
+            years = [int(value) for value in selected]
+            species = input.comparison_single_species()
+            nests = data.nests.loc[pd.to_numeric(data.nests["year"], errors="coerce").isin(years) & data.nests["species"].eq(species)].copy()
+            chicks = data.chicks.loc[pd.to_numeric(data.chicks["year"], errors="coerce").isin(years) & data.chicks["species"].eq(species)].copy()
+            chronology = data.chronology.loc[pd.to_numeric(data.chronology["year"], errors="coerce").isin(years) & data.chronology["species"].eq(species)].copy()
+        filter_value = input.comparison_filter()
+        if filter_value and filter_value != "Overall":
+            column, value = filter_value.split(":", 1)
+            nests = nests.loc[nests[column].eq(value)]
+            chicks = chicks.loc[chicks["plot"].eq(value)] if column == "plot" else chicks.loc[chicks["nest_key"].isin(nests["nest_key"])]
+            chronology = chronology.loc[chronology["plot"].eq(value)] if column == "plot" else chronology.loc[chronology["nest_key"].isin(nests["nest_key"])]
+        source = nests
+        if metric == "fledge_rate":
+            source = chicks.loc[chicks["hatched"]].copy()
+            source["value"] = source["verified_fledged"].astype(float)
+        elif metric in {"lay_midpoint", "hatch_midpoint", "fledge_midpoint"}:
+            source = chronology.copy()
+            source["value"] = pd.to_datetime(source[metric], errors="coerce").dt.dayofyear
+        else:
+            source = nests.copy()
+            source["value"] = pd.to_numeric(source[metric], errors="coerce")
+        source["group"] = source[group_column].astype(str)
+        return source[["group", "value"]].dropna()
+
+    @render.ui
+    def comparison_status():
+        group_column, selected = comparison_groups()
+        available = comparison_data()["group"].nunique()
+        if len(selected) < 2:
+            return ui.div("Choose at least two years or species.", class_="alert alert-warning")
+        if available < 2:
+            return ui.div("Fewer than two selected groups contain data for this metric and filter.", class_="alert alert-warning")
+        return ui.div(f"Comparing {available} {group_column} groups.", class_="alert alert-success")
+
+    @render.plot
+    def comparison_plot():
+        metric = input.comparison_metric()
+        labels = {
+            "clutch_size": "Clutch size",
+            "hatched_chicks": "Hatched chicks per nest",
+            "verified_fledglings": "Verified fledglings per nest",
+            "fledge_rate": "Verified fledging rate",
+            "lay_midpoint": "Lay date",
+            "hatch_midpoint": "Hatch date",
+            "fledge_midpoint": "Fledge date",
+        }
+        return comparison_figure(
+            comparison_data(),
+            input.comparison_chart_style(),
+            labels[metric],
+            metric.endswith("_midpoint"),
         )
 
     @reactive.calc
@@ -610,6 +943,157 @@ def server(input, output, session):
     @render.data_frame
     def qc_table():
         return render.DataGrid(current_data().qc, filters=True, width="100%", height="600px")
+
+    def filtered_chronology() -> pd.DataFrame:
+        frame = current_data().chronology
+        selected = input.chronology_plot_filter()
+        return frame if selected == "Overall" else frame.loc[frame["plot"] == selected]
+
+    def figure_bytes(fig) -> bytes:
+        buffer = BytesIO()
+        fig.savefig(buffer, format="png", dpi=180, bbox_inches="tight")
+        plt.close(fig)
+        return buffer.getvalue()
+
+    def artifact_context() -> str:
+        return "_".join(
+            [
+                safe_name(input.selected_species()),
+                safe_name(input.selected_year()),
+            ]
+        )
+
+    def artifact_payload(key: str) -> tuple[str, bytes]:
+        context = artifact_context()
+        style = input.productivity_chart_style()
+        if key == "outcome_png":
+            return f"chick_outcomes_{context}.png", figure_bytes(outcome_figure(current_data().chicks))
+        if key == "overview_box_png":
+            return f"nest_distributions_{context}.png", figure_bytes(nest_box_figure(current_data().nests))
+        if key == "clutch_png":
+            name = f"clutch_size_{safe_name(style)}_{context}_{safe_name(input.productivity_plot())}.png"
+            return name, figure_bytes(clutch_figure(productivity_nests(), style))
+        if key == "productivity_png":
+            name = f"nest_productivity_{safe_name(style)}_{context}_{safe_name(input.productivity_plot())}.png"
+            return name, figure_bytes(nest_productivity_figure(productivity_nests(), style))
+        if key == "chronology_png":
+            style = input.chronology_chart_style()
+            name = f"chronology_{safe_name(style)}_{context}_{safe_name(input.chronology_plot_filter())}_{safe_name(input.chronology_method())}.png"
+            return name, figure_bytes(chronology_figure(filtered_chronology(), input.chronology_method(), style))
+        if key == "comparison_png":
+            metric = input.comparison_metric()
+            labels = {
+                "clutch_size": "Clutch size",
+                "hatched_chicks": "Hatched chicks per nest",
+                "verified_fledglings": "Verified fledglings per nest",
+                "fledge_rate": "Verified fledging rate",
+                "lay_midpoint": "Lay date",
+                "hatch_midpoint": "Hatch date",
+                "fledge_midpoint": "Fledge date",
+            }
+            name = f"comparison_{safe_name(input.comparison_mode())}_{safe_name(metric)}_{safe_name(input.comparison_chart_style())}_{safe_name(input.comparison_filter())}.png"
+            fig = comparison_figure(comparison_data(), input.comparison_chart_style(), labels[metric], metric.endswith("_midpoint"))
+            return name, figure_bytes(fig)
+        csv_artifacts = {
+            "nests_csv": ("nests", current_data().nests),
+            "chicks_csv": ("chicks", current_data().chicks),
+            "summary_csv": ("summary", current_data().summary),
+            "chronology_csv": ("chronology", current_data().chronology),
+            "banded_csv": ("banded_filtered", filtered_banded()),
+            "qc_csv": ("quality_control", current_data().qc),
+            "comparison_csv": (
+                f"comparison_{safe_name(input.comparison_mode())}_{safe_name(input.comparison_metric())}_{safe_name(input.comparison_filter())}",
+                comparison_data(),
+            ),
+        }
+        label, frame = csv_artifacts[key]
+        return f"{label}_{context}.csv", frame.to_csv(index=False).encode("utf-8")
+
+    @render.ui
+    def download_selector_ui():
+        req(analysis_data())
+        return ui.input_select(
+            "download_artifact",
+            "Figure or table",
+            {
+                "outcome_png": "Chick outcomes (PNG)",
+                "overview_box_png": "Nest distributions (PNG)",
+                "clutch_png": "Clutch size, current view (PNG)",
+                "productivity_png": "Nest productivity, current view (PNG)",
+                "chronology_png": "Chronology, current view (PNG)",
+                "comparison_png": "Comparison, current view (PNG)",
+                "nests_csv": "Nests (CSV)",
+                "chicks_csv": "Chicks (CSV)",
+                "summary_csv": "Summary (CSV)",
+                "chronology_csv": "Chronology (CSV)",
+                "banded_csv": "Filtered banded chicks (CSV)",
+                "qc_csv": "Quality control (CSV)",
+                "comparison_csv": "Comparison values (CSV)",
+            },
+        )
+
+    @render.download(filename=lambda: artifact_payload(input.download_artifact())[0])
+    def download_selected():
+        yield artifact_payload(input.download_artifact())[1]
+
+    @render.download(filename=lambda: f"ROST_dashboard_exports_{artifact_context()}.zip")
+    def download_all():
+        buffer = BytesIO()
+        keys = [
+            "outcome_png", "overview_box_png", "nests_csv", "chicks_csv", "summary_csv",
+            "chronology_csv", "banded_csv", "qc_csv",
+        ]
+        if comparison_data()["group"].nunique() >= 2:
+            keys.append("comparison_csv")
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+            for key in keys:
+                name, payload = artifact_payload(key)
+                archive.writestr(name, payload)
+            context = artifact_context()
+            productivity_context = f"{context}_{safe_name(input.productivity_plot())}"
+            chronology_context = f"{context}_{safe_name(input.chronology_plot_filter())}_{safe_name(input.chronology_method())}"
+            for style in ("Bar", "Box"):
+                archive.writestr(
+                    f"clutch_size_{style}_{productivity_context}.png",
+                    figure_bytes(clutch_figure(productivity_nests(), style)),
+                )
+                archive.writestr(
+                    f"nest_productivity_{style}_{productivity_context}.png",
+                    figure_bytes(nest_productivity_figure(productivity_nests(), style)),
+                )
+            for style in ("Cumulative", "Bar", "Box"):
+                archive.writestr(
+                    f"chronology_{style}_{chronology_context}.png",
+                    figure_bytes(
+                        chronology_figure(
+                            filtered_chronology(), input.chronology_method(), style
+                        )
+                    ),
+                )
+            if comparison_data()["group"].nunique() >= 2:
+                metric = input.comparison_metric()
+                label = {
+                    "clutch_size": "Clutch size",
+                    "hatched_chicks": "Hatched chicks per nest",
+                    "verified_fledglings": "Verified fledglings per nest",
+                    "fledge_rate": "Verified fledging rate",
+                    "lay_midpoint": "Lay date",
+                    "hatch_midpoint": "Hatch date",
+                    "fledge_midpoint": "Fledge date",
+                }[metric]
+                for style in ("Bar", "Box"):
+                    archive.writestr(
+                        f"comparison_{safe_name(input.comparison_mode())}_{safe_name(metric)}_{style}_{safe_name(input.comparison_filter())}.png",
+                        figure_bytes(
+                            comparison_figure(
+                                comparison_data(),
+                                style,
+                                label,
+                                metric.endswith("_midpoint"),
+                            )
+                        ),
+                    )
+        yield buffer.getvalue()
 
     @render.download(
         filename=lambda: f"quality_control_exceptions_{input.selected_year()}.csv"
