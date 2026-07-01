@@ -26,6 +26,13 @@ DEFAULT_YEAR = 2025
 SPECIES = "ROST"
 VALID_STATUS = {"A", "P", "M", "D", "L", "H", "F"}
 PLACEHOLDER_PFR = {"", "UNBANDED"}
+# Stakeholder-adjudicated outcomes that are not represented by Status = F or an
+# eligible resight in the supplied workbooks. Keep these explicit and keyed by
+# year and unique PFR so the exception remains reviewable.
+REVIEW_CONFIRMED_FLEDGLINGS = {
+    (2025, "XT0"),
+    (2025, "YE0"),
+}
 XLSX_NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
 REL_NS = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
 PKG_REL_NS = "{http://schemas.openxmlformats.org/package/2006/relationships}"
@@ -678,13 +685,14 @@ def derive_tables(
         resight_yes = any(row["fledged"] == "yes" for row in eligible_resights)
         resight_no = any(row["fledged"] == "no" for row in eligible_resights)
         productivity_f = bool(first_f_status)
+        reviewer_confirmed = (year, pfr) in REVIEW_CONFIRMED_FLEDGLINGS
         yes_resight_dates = [
             row["_date"]
             for row in eligible_resights
             if row["fledged"] == "yes" and row["_date"]
         ]
         first_resight_yes = min(yes_resight_dates) if yes_resight_dates else None
-        verified_fledged = bool(productivity_f or resight_yes)
+        verified_fledged = bool(productivity_f or resight_yes or reviewer_confirmed)
         verified_fledge_dates = [
             value for value in (first_f_status, first_resight_yes) if value
         ]
@@ -716,6 +724,8 @@ def derive_tables(
             verification_basis = "productivity_status_f"
         elif resight_yes:
             verification_basis = "resight_yes"
+        elif reviewer_confirmed:
+            verification_basis = "reviewer_confirmation"
         else:
             verification_basis = ""
         known_dead = any(row["status"] == "D" for row in records) and not verified_fledged
@@ -742,6 +752,8 @@ def derive_tables(
             chick_flags.append("status_h_without_chick_state")
         if pfr and (year, species, pfr) not in resights_by_pfr:
             chick_flags.append("pfr_without_resight")
+        if reviewer_confirmed:
+            chick_flags.append("reviewer_confirmed_fledge")
         if pfr_ambiguous:
             chick_flags.append("ambiguous_pfr_multiple_slots")
         if not pfr:

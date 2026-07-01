@@ -162,9 +162,9 @@ def validate_acceptance_totals(data: AppData) -> None:
         "nests": (len(data.nests), 114),
         "slots": (len(data.chicks), 204),
         "hatched": (int(data.chicks["hatched"].sum()), 156),
-        "verified": (int(data.chicks["verified_fledged"].sum()), 102),
+        "verified": (int(data.chicks["verified_fledged"].sum()), 104),
         "banded": (len(data.banded_chicks), 116),
-        "banded verified": ((data.banded_chicks["fledged"] == "Yes").sum(), 101),
+        "banded verified": ((data.banded_chicks["fledged"] == "Yes").sum(), 103),
     }
     failures = [f"{name}: got {actual}, expected {wanted}" for name, (actual, wanted) in expected.items() if actual != wanted]
     if failures:
