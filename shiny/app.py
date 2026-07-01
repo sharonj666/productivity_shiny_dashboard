@@ -57,16 +57,23 @@ RESIGHT_FIELDS = {
 }
 
 
-def upload_path(value) -> Path | None:
+def upload_paths(value) -> list[Path]:
     if not value:
-        return None
-    item = value[0]
-    if int(item.get("size", 0)) > MAX_UPLOAD_BYTES:
-        raise ValueError("Each workbook must be 50 MB or smaller")
-    name = str(item.get("name", ""))
-    if not name.lower().endswith(".xlsx"):
-        raise ValueError(f"{name or 'Upload'} must be an .xlsx workbook")
-    return Path(item["datapath"])
+        return []
+    paths = []
+    for item in value:
+        if int(item.get("size", 0)) > MAX_UPLOAD_BYTES:
+            raise ValueError("Each workbook must be 50 MB or smaller")
+        name = str(item.get("name", ""))
+        if not name.lower().endswith(".xlsx"):
+            raise ValueError(f"{name or 'Upload'} must be an .xlsx workbook")
+        paths.append(Path(item["datapath"]))
+    return paths
+
+
+def upload_path(value) -> Path | None:
+    paths = upload_paths(value)
+    return paths[0] if paths else None
 
 
 def mapping_ui(prefix: str, fields, headers: list[str]):
@@ -228,11 +235,22 @@ app_ui = ui.page_navbar(
         ui.layout_columns(
             ui.card(
                 ui.card_header("1. Select workbooks"),
+                ui.input_radio_buttons(
+                    "upload_comparison_mode",
+                    "Analysis setup",
+                    {
+                        "single": "Analyze one species in one year",
+                        "years": "Compare one species across years",
+                        "species": "Compare species within one year",
+                    },
+                    selected="single",
+                ),
+                ui.output_ui("upload_requirements"),
                 ui.input_file(
                     "productivity_file",
-                    "Productivity workbook *",
+                    "Productivity workbook(s) *",
                     accept=[".xlsx"],
-                    multiple=False,
+                    multiple=True,
                 ),
                 ui.output_ui("productivity_sheet_ui"),
                 ui.input_file(
@@ -318,14 +336,7 @@ app_ui = ui.page_navbar(
         "Compare",
         ui.layout_sidebar(
             ui.sidebar(
-                ui.input_radio_buttons(
-                    "comparison_mode",
-                    "Comparison type",
-                    {
-                        "years": "Same species across years",
-                        "species": "Same year across species",
-                    },
-                ),
+                ui.output_ui("comparison_mode_summary"),
                 ui.output_ui("comparison_selectors"),
                 ui.output_ui("comparison_plot_filter_ui"),
                 ui.input_select(
@@ -417,8 +428,26 @@ def server(input, output, session):
     analysis_data = reactive.value(None)
     error_message = reactive.value("")
     success_message = reactive.value("")
+    analysis_mode = reactive.value("single")
     productivity_headers = reactive.value([])
     resight_headers = reactive.value([])
+
+    @render.ui
+    def upload_requirements():
+        if input.upload_comparison_mode() == "single":
+            return ui.p(
+                "Upload one workbook containing one year and one species.",
+                class_="callout",
+            )
+        if input.upload_comparison_mode() == "species":
+            return ui.p(
+                "Upload one workbook containing one year and at least two species.",
+                class_="callout",
+            )
+        return ui.p(
+            "Upload at least two workbooks. Each workbook must contain one distinct year and the same species.",
+            class_="callout",
+        )
 
     @reactive.effect
     @reactive.event(input.productivity_file)
@@ -517,19 +546,21 @@ def server(input, output, session):
         if not source_column:
             return ui.p("Map the date column to preview analysis years.", class_="text-warning")
         try:
-            path = upload_path(input.productivity_file())
-            req(path, input.productivity_sheet())
-            _, rows = read_sheet(path, input.productivity_sheet())
-            parsed = [parse_excel_date(row.get(source_column, ""))[0] for row in rows]
-            years = sorted({value.year for value in parsed if value})
-            invalid = sum(value is None for value in parsed)
-            if not years:
-                return ui.p("No valid years detected in the mapped date column.", class_="text-danger")
-            suffix = f"; {invalid:,} row(s) have unreadable dates" if invalid else ""
-            return ui.p(
-                "Detected analysis years: " + ", ".join(map(str, years)) + suffix,
-                class_="callout",
-            )
+            paths = upload_paths(input.productivity_file())
+            req(paths, input.productivity_sheet())
+            details = []
+            upload_items = input.productivity_file()
+            for index, path in enumerate(paths):
+                _, rows = read_sheet(path, input.productivity_sheet())
+                parsed = [parse_excel_date(row.get(source_column, ""))[0] for row in rows]
+                years = sorted({value.year for value in parsed if value})
+                invalid = sum(value is None for value in parsed)
+                filename = str(upload_items[index].get("name", path.name))
+                label = filename + ": " + (", ".join(map(str, years)) if years else "no valid year")
+                if invalid:
+                    label += f" ({invalid:,} unreadable date row(s))"
+                details.append(ui.tags.li(label))
+            return ui.div(ui.strong("Detected years by workbook"), ui.tags.ul(*details), class_="callout")
         except Exception as exc:
             return ui.p(str(exc), class_="text-danger")
 
@@ -563,9 +594,16 @@ def server(input, output, session):
         error_message.set("")
         success_message.set("")
         try:
-            productivity_path = upload_path(input.productivity_file())
-            if productivity_path is None:
-                raise ValueError("Upload a productivity workbook")
+            productivity_paths = upload_paths(input.productivity_file())
+            if not productivity_paths:
+                raise ValueError("Upload at least one productivity workbook")
+            mode = input.upload_comparison_mode()
+            if mode == "years" and len(productivity_paths) < 2:
+                raise ValueError("Cross-year comparison requires at least two productivity workbooks")
+            if mode == "species" and len(productivity_paths) != 1:
+                raise ValueError("Cross-species comparison requires exactly one productivity workbook")
+            if mode == "single" and len(productivity_paths) != 1:
+                raise ValueError("Single-year analysis requires exactly one productivity workbook")
             productivity_map = collect_map("prod", PRODUCTIVITY_FIELDS)
             species_default = ""
             if "Species" not in productivity_map:
@@ -576,19 +614,45 @@ def server(input, output, session):
             resight_map = (
                 collect_map("res", RESIGHT_FIELDS) if resight_path is not None else None
             )
-            result = analyze_workbooks(
-                productivity_path=productivity_path,
-                productivity_sheet=input.productivity_sheet(),
-                productivity_map=productivity_map,
-                resight_path=resight_path,
-                resight_sheet=input.resight_sheet() if resight_path else None,
-                resight_map=resight_map,
-                species_default=species_default,
-            )
-            data = from_analysis(result)
+            results = []
+            workbook_years = []
+            upload_items = input.productivity_file()
+            for index, productivity_path in enumerate(productivity_paths):
+                filename = str(upload_items[index].get("name", productivity_path.name))
+                result = analyze_workbooks(
+                    productivity_path=productivity_path,
+                    productivity_sheet=input.productivity_sheet(),
+                    productivity_map=productivity_map,
+                    resight_path=resight_path,
+                    resight_sheet=input.resight_sheet() if resight_path else None,
+                    resight_map=resight_map,
+                    species_default=species_default,
+                )
+                years = sorted({int(row["year"]) for row in result["chicks"]})
+                if len(years) != 1:
+                    raise ValueError(
+                        f"{filename} must contain exactly one analysis year; found "
+                        + (", ".join(map(str, years)) if years else "none")
+                    )
+                workbook_years.append(years[0])
+                results.append(result)
+            if mode == "years" and len(set(workbook_years)) != len(workbook_years):
+                raise ValueError("Each cross-year workbook must represent a distinct year")
+            combined = {
+                key: [row for result in results for row in result[key]]
+                for key in ("summary", "chronology_summary", "nests", "chicks", "chronology", "qc")
+            }
+            data = from_analysis(combined)
+            if mode == "years" and len(data.species) != 1:
+                raise ValueError("Cross-year workbooks must all contain the same single species")
+            if mode == "species" and len(data.species) < 2:
+                raise ValueError("Cross-species comparison requires at least two species in the workbook")
+            if mode == "single" and (len(data.years) != 1 or len(data.species) != 1):
+                raise ValueError("Single-year analysis requires exactly one year and one species")
             if not data.years:
                 raise ValueError("No usable analysis years were detected")
             analysis_data.set(data)
+            analysis_mode.set(mode)
             latest_year = data.years[-1]
             latest_species = sorted(
                 data.chicks.loc[data.chicks["year"].eq(latest_year), "species"].unique()
@@ -789,11 +853,29 @@ def server(input, output, session):
             col_widths=(4, 4, 4),
         )
 
+    def selected_comparison_mode() -> str:
+        return analysis_mode()
+
+    @render.ui
+    def comparison_mode_summary():
+        labels = {
+            "single": "Single species, single year — comparison is not enabled",
+            "years": "Same species across years",
+            "species": "Same year across species",
+        }
+        label = labels[selected_comparison_mode()]
+        return ui.div(ui.strong("Comparison type"), ui.p(label), class_="callout")
+
     @render.ui
     def comparison_selectors():
         data = analysis_data()
         req(data)
-        if input.comparison_mode() == "species":
+        if selected_comparison_mode() == "single":
+            return ui.p(
+                "Upload data using a comparison option to enable this tab.",
+                class_="text-muted",
+            )
+        if selected_comparison_mode() == "species":
             return ui.TagList(
                 ui.input_select(
                     "comparison_year",
@@ -838,7 +920,9 @@ def server(input, output, session):
         return ui.input_select("comparison_filter", "Plot/location", choices)
 
     def comparison_groups() -> tuple[str, list[str]]:
-        if input.comparison_mode() == "species":
+        if selected_comparison_mode() == "single":
+            return "group", []
+        if selected_comparison_mode() == "species":
             selected = list(input.comparison_species() or [])
             return "species", selected
         selected = [str(value) for value in (input.comparison_years() or [])]
@@ -848,6 +932,8 @@ def server(input, output, session):
     def comparison_data() -> pd.DataFrame:
         data = analysis_data()
         req(data)
+        if selected_comparison_mode() == "single":
+            return pd.DataFrame(columns=["group", "value"])
         group_column, selected = comparison_groups()
         metric = input.comparison_metric()
         if group_column == "species":
@@ -882,6 +968,11 @@ def server(input, output, session):
 
     @render.ui
     def comparison_status():
+        if selected_comparison_mode() == "single":
+            return ui.div(
+                "This upload is configured for single-year analysis; no comparison is generated.",
+                class_="alert alert-info",
+            )
         group_column, selected = comparison_groups()
         available = comparison_data()["group"].nunique()
         if len(selected) < 2:
@@ -991,7 +1082,7 @@ def server(input, output, session):
                 "hatch_midpoint": "Hatch date",
                 "fledge_midpoint": "Fledge date",
             }
-            name = f"comparison_{safe_name(input.comparison_mode())}_{safe_name(metric)}_{safe_name(input.comparison_chart_style())}_{safe_name(input.comparison_filter())}.png"
+            name = f"comparison_{safe_name(selected_comparison_mode())}_{safe_name(metric)}_{safe_name(input.comparison_chart_style())}_{safe_name(input.comparison_filter())}.png"
             fig = comparison_figure(comparison_data(), input.comparison_chart_style(), labels[metric], metric.endswith("_midpoint"))
             return name, figure_bytes(fig)
         csv_artifacts = {
@@ -1002,7 +1093,7 @@ def server(input, output, session):
             "banded_csv": ("banded_filtered", filtered_banded()),
             "qc_csv": ("quality_control", current_data().qc),
             "comparison_csv": (
-                f"comparison_{safe_name(input.comparison_mode())}_{safe_name(input.comparison_metric())}_{safe_name(input.comparison_filter())}",
+                f"comparison_{safe_name(selected_comparison_mode())}_{safe_name(input.comparison_metric())}_{safe_name(input.comparison_filter())}",
                 comparison_data(),
             ),
         }
@@ -1083,7 +1174,7 @@ def server(input, output, session):
                 }[metric]
                 for style in ("Bar", "Box"):
                     archive.writestr(
-                        f"comparison_{safe_name(input.comparison_mode())}_{safe_name(metric)}_{style}_{safe_name(input.comparison_filter())}.png",
+                        f"comparison_{safe_name(selected_comparison_mode())}_{safe_name(metric)}_{style}_{safe_name(input.comparison_filter())}.png",
                         figure_bytes(
                             comparison_figure(
                                 comparison_data(),

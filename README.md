@@ -42,16 +42,22 @@ Stop the app with `Ctrl+C` in the terminal.
 
 ## Using the app
 
-1. Upload a productivity `.xlsx` workbook.
-2. Optionally upload a resight `.xlsx` workbook.
-3. Select the relevant worksheet in each workbook.
-4. Review or change the column mappings.
-5. Map a species column, or enter one species label for the whole workbook.
-6. Confirm the detected analysis years.
-7. Select **Generate analysis**.
-8. Use the year and species selectors to explore a single season.
-9. Use **Compare** for same-species cross-year or same-year cross-species charts.
-10. Use **Downloads** to export a selected PNG/CSV or a ZIP of all results.
+1. Choose **Analyze one species in one year**, **Compare one species across
+   years**, or **Compare species within one year**.
+2. For single-year analysis (including the current ROST 2025 dataset), upload
+   one workbook containing exactly one year and one species.
+3. For cross-year analysis, upload at least two single-year productivity `.xlsx`
+   workbooks with distinct years and the same species.
+4. For cross-species analysis, upload one single-year productivity workbook
+   containing at least two species.
+5. Optionally upload a resight `.xlsx` workbook.
+6. Select the shared worksheet and review the column mappings.
+7. Map a species column, or enter one species label for all uploaded rows.
+8. Confirm the detected year shown for each workbook, then select
+   **Generate analysis**.
+9. Use the year and species selectors to explore a single season.
+10. Use **Compare** when a comparison mode was selected during upload.
+11. Use **Downloads** to export a selected PNG/CSV or a ZIP of all results.
 
 Uploads are temporary and remain isolated to the browser session. The app does
 not save uploaded workbooks or generated analysis tables.
