@@ -10,6 +10,8 @@ ROST productivity dashboard. It does not contain project source data.
 
 ## Setup
 
+### macOS and Linux
+
 Open a terminal in this folder and run:
 
 ```bash
@@ -18,10 +20,32 @@ source .venv/bin/activate
 python -m pip install -r requirements.txt
 ```
 
-On Windows PowerShell, activate the environment with:
+### Windows PowerShell
+
+Open PowerShell in this folder and run:
 
 ```powershell
+py -m venv .venv
 .\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+```
+
+If PowerShell blocks the activation script, allow it for the current session
+and try again:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\.venv\Scripts\Activate.ps1
+```
+
+### Windows Command Prompt
+
+Open Command Prompt in this folder and run:
+
+```bat
+py -m venv .venv
+.venv\Scripts\activate.bat
+python -m pip install -r requirements.txt
 ```
 
 ## Launch
@@ -29,13 +53,20 @@ On Windows PowerShell, activate the environment with:
 From this folder, run:
 
 ```bash
-shiny run --reload --launch-browser shiny/app.py
+shiny run --reload --launch-browser --port 8080 shiny/app.py
+```
+
+The same launch command works in Windows PowerShell and Command Prompt after
+the virtual environment has been activated:
+
+```powershell
+shiny run --reload --launch-browser --port 8080 shiny/app.py
 ```
 
 If the browser does not open automatically, visit:
 
 ```text
-http://127.0.0.1:8000
+http://127.0.0.1:8080
 ```
 
 Stop the app with `Ctrl+C` in the terminal.

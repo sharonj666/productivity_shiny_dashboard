@@ -112,10 +112,55 @@ def outcome_figure(chicks: pd.DataFrame):
     labels = ["Verified fledged", "Known dead", "Unresolved", "Not hatched"]
     counts = chicks["outcome"].value_counts().reindex(order, fill_value=0)
     fig, ax = plt.subplots(figsize=(7, 3.8))
-    bars = ax.bar(labels, counts, color=["#3e8e41", "#b54137", "#da9e2c", "#78909c"])
+    bars = ax.barh(labels, counts, color=["#3e8e41", "#b54137", "#da9e2c", "#78909c"])
     ax.bar_label(bars)
-    ax.set_ylabel("Chick slots")
-    ax.tick_params(axis="x", rotation=20)
+    ax.set_xlabel("Chick slots")
+    ax.invert_yaxis()
+    fig.tight_layout()
+    return fig
+
+
+def verification_figure(chicks: pd.DataFrame):
+    verified = chicks.loc[chicks["verified_fledged"]]
+    order = ["both", "productivity_status_f", "resight_yes", "reviewer_confirmation"]
+    labels = ["Productivity + resight", "Status = F only", "Resight only", "Reviewer-confirmed"]
+    counts = verified["fledge_verification_basis"].value_counts().reindex(order, fill_value=0)
+    fig, ax = plt.subplots(figsize=(7, 3.8))
+    bars = ax.barh(labels, counts, color=["#258b87", "#2670a0", "#78909c", "#da9e2c"])
+    ax.bar_label(bars)
+    ax.set_xlabel("Verified fledglings")
+    ax.invert_yaxis()
+    fig.tight_layout()
+    return fig
+
+
+def rate_by_plot_figure(summary: pd.DataFrame):
+    metrics = {
+        "apparent_verified_fledge_rate": "Apparent rate",
+        "resolved_outcome_fledge_rate": "Resolved-outcome rate",
+    }
+    frame = summary.loc[
+        summary["metric"].isin(metrics) & summary["group"].ne("Overall")
+    ].copy()
+    if frame.empty:
+        return empty_figure("No plot-level rate data", (7, 4))
+    frame["mean"] = pd.to_numeric(frame["mean"], errors="coerce")
+    groups = sorted(frame["group"].unique())
+    x = list(range(len(groups)))
+    fig, ax = plt.subplots(figsize=(7, 4))
+    width = 0.36
+    for index, (metric, label) in enumerate(metrics.items()):
+        values = frame.loc[frame["metric"].eq(metric)].set_index("group")["mean"].reindex(groups)
+        positions = [value + (index - 0.5) * width for value in x]
+        bars = ax.bar(positions, values, width, label=label)
+        ax.bar_label(
+            bars,
+            labels=[f"{value:.1%}" if pd.notna(value) else "—" for value in values],
+        )
+    ax.set_xticks(x, groups)
+    ax.set_ylim(0, 1.05)
+    ax.set(xlabel="Plot", ylabel="Proportion", title="Verified fledging rates by plot")
+    ax.legend(loc="upper left", bbox_to_anchor=(0, -0.16), ncol=2, frameon=False)
     fig.tight_layout()
     return fig
 
@@ -170,6 +215,33 @@ def nest_productivity_figure(nests: pd.DataFrame, style: str):
 
 
 def chronology_figure(frame: pd.DataFrame, method: str, style: str):
+    if style == "Cumulative":
+        report_columns = [
+            ("Lay dates", "lay_first_observed"),
+            ("Hatch midpoint estimates", "hatch_midpoint"),
+            ("Verified fledge midpoint estimates", "fledge_midpoint"),
+        ]
+        if frame.empty:
+            return empty_figure("No chronology data", (9, 8))
+        fig, axes = plt.subplots(3, 1, figsize=(9, 10), sharex=True)
+        has_data = False
+        for ax, (title, column) in zip(axes, report_columns):
+            for plot, group in frame.groupby("plot"):
+                dates = pd.to_datetime(group[column], errors="coerce").dropna().sort_values()
+                if not dates.empty:
+                    has_data = True
+                    ax.step(dates, range(1, len(dates) + 1), where="post", label=plot)
+            ax.set_title(title)
+            ax.set_ylabel("Cumulative slots")
+            if ax.lines:
+                ax.legend()
+        axes[-1].set_xlabel("Date")
+        fig.autofmt_xdate()
+        fig.tight_layout()
+        if not has_data:
+            plt.close(fig)
+            return empty_figure("No chronology data", (9, 8))
+        return fig
     columns = {
         "Lay": f"lay_{method}",
         "Hatch": f"hatch_{method}",
@@ -182,14 +254,7 @@ def chronology_figure(frame: pd.DataFrame, method: str, style: str):
     if not any(not values.empty for values in series.values()):
         return empty_figure("No chronology data", (9, 4.5))
     fig, ax = plt.subplots(figsize=(9, 4.5))
-    if style == "Cumulative":
-        for label, dates in series.items():
-            dates = dates.sort_values()
-            if not dates.empty:
-                ax.step(dates, range(1, len(dates) + 1), where="post", label=label)
-        ax.set(xlabel="Date", ylabel="Cumulative events")
-        ax.legend()
-    elif style == "Box":
+    if style == "Box":
         present = [(label, dates.map(mdates.date2num)) for label, dates in series.items() if not dates.empty]
         ax.boxplot([values for _, values in present], tick_labels=[label for label, _ in present])
         ax.yaxis_date()
@@ -285,11 +350,33 @@ app_ui = ui.page_navbar(
     ui.nav_panel(
         "Overview",
         ui.output_ui("overview_cards"),
+        ui.card(
+            ui.card_header("Overall productivity summary"),
+            ui.p("Nest is the analytical unit; SD is the sample standard deviation.", class_="text-muted"),
+            ui.output_data_frame("productivity_summary_table"),
+        ),
         ui.layout_columns(
-            ui.card(ui.card_header("Chick outcomes"), ui.output_plot("outcome_plot")),
-            ui.card(ui.card_header("Nest distributions"), ui.output_plot("overview_box_plot")),
+            ui.card(
+                ui.card_header("Chick outcomes"),
+                ui.output_plot("outcome_plot", height="390px"),
+            ),
+            ui.card(
+                ui.card_header("How fledging was verified"),
+                ui.output_plot("verification_plot", height="390px"),
+            ),
+            col_widths=(6, 6),
+        ),
+        ui.layout_columns(
             ui.card(ui.card_header("Fledging rates"), ui.output_ui("rate_summary")),
-            col_widths=(4, 4, 4),
+            ui.card(
+                ui.card_header("Verified fledging rates by plot"),
+                ui.output_plot("rate_by_plot", height="430px"),
+            ),
+            col_widths=(4, 8),
+        ),
+        ui.card(
+            ui.card_header("Nest distributions"),
+            ui.output_plot("overview_box_plot", height="420px"),
         ),
     ),
     ui.nav_panel(
@@ -300,10 +387,13 @@ app_ui = ui.page_navbar(
                 ui.input_select("productivity_chart_style", "Chart style", ["Bar", "Box"]),
             ),
             ui.layout_columns(
-                ui.card(ui.card_header("Clutch size"), ui.output_plot("clutch_plot")),
+                ui.card(
+                    ui.card_header("Clutch size"),
+                    ui.output_plot("clutch_plot", height="440px"),
+                ),
                 ui.card(
                     ui.card_header("Hatched chicks and fledglings per nest"),
-                    ui.output_plot("nest_productivity_plot"),
+                    ui.output_plot("nest_productivity_plot", height="440px"),
                 ),
                 col_widths=(6, 6),
             ),
@@ -327,7 +417,7 @@ app_ui = ui.page_navbar(
             ),
             ui.card(
                 ui.card_header(ui.output_text("chronology_chart_title")),
-                ui.output_plot("chronology_plot"),
+                ui.output_ui("chronology_plot_container"),
             ),
             ui.output_ui("chronology_medians"),
         ),
@@ -355,7 +445,10 @@ app_ui = ui.page_navbar(
                 ui.input_select("comparison_chart_style", "Chart style", ["Bar", "Box"]),
             ),
             ui.output_ui("comparison_status"),
-            ui.card(ui.card_header("Comparison"), ui.output_plot("comparison_plot")),
+            ui.card(
+                ui.card_header("Comparison"),
+                ui.output_plot("comparison_plot", height="520px"),
+            ),
         ),
     ),
     ui.nav_panel(
@@ -408,7 +501,7 @@ app_ui = ui.page_navbar(
             ui.tags.ul(
                 ui.tags.li("The shared Python cleaning workflow is the source of truth."),
                 ui.tags.li("Each year is analyzed independently."),
-                ui.tags.li("Status = F or a same-year matched Yes! resight verifies fledging."),
+                ui.tags.li("Status = F, a same-year/species matched Yes! resight, or an explicit reviewer confirmation verifies fledging."),
                 ui.tags.li("Apparent rate: verified fledglings / all hatched chicks."),
                 ui.tags.li("Resolved rate: verified / (verified + known dead)."),
                 ui.tags.li("Uploaded files are not written into project outputs."),
@@ -420,7 +513,7 @@ app_ui = ui.page_navbar(
     title="ROST Productivity",
     id="main_nav",
     header=ui.tags.style(APP_CSS),
-    fillable=True,
+    fillable=False,
 )
 
 
@@ -770,9 +863,45 @@ def server(input, output, session):
             col_widths=(2, 2, 3, 2, 3),
         )
 
+    def productivity_summary_frame() -> pd.DataFrame:
+        nests = current_data().nests
+        columns = {
+            "Clutch size": "clutch_size",
+            "Eggs hatched per nest": "hatched_chicks",
+            "Chicks fledged per nest": "verified_fledglings",
+        }
+        rows = []
+        for label, operation in [
+            ("Average", "mean"),
+            ("SD", "std"),
+            ("Number of nests", "count"),
+            ("Total number of eggs/chicks", "sum"),
+        ]:
+            row = {"Statistic": label}
+            for display, column in columns.items():
+                values = pd.to_numeric(nests[column], errors="coerce")
+                value = getattr(values, operation)()
+                row[display] = (
+                    f"{value:.2f}" if operation in {"mean", "std"} else f"{int(value):,}"
+                )
+            rows.append(row)
+        return pd.DataFrame(rows)
+
+    @render.data_frame
+    def productivity_summary_table():
+        return render.DataGrid(productivity_summary_frame(), width="100%", height="230px")
+
     @render.plot
     def outcome_plot():
         return outcome_figure(overview_chicks())
+
+    @render.plot
+    def verification_plot():
+        return verification_figure(overview_chicks())
+
+    @render.plot
+    def rate_by_plot():
+        return rate_by_plot_figure(current_data().summary)
 
     @render.plot
     def overview_box_plot():
@@ -828,18 +957,34 @@ def server(input, output, session):
             frame = frame.loc[frame["plot"] == selected]
         return chronology_figure(frame, method, input.chronology_chart_style())
 
+    @render.ui
+    def chronology_plot_container():
+        height = "900px" if input.chronology_chart_style() == "Cumulative" else "520px"
+        return ui.output_plot("chronology_plot", height=height)
+
     @render.text
     def chronology_chart_title():
+        if input.chronology_chart_style() == "Cumulative":
+            return "Report-style breeding chronology by plot"
         return f"{input.chronology_chart_style()} breeding chronology"
 
     @render.ui
     def chronology_medians():
         group = input.chronology_plot_filter()
         method = input.chronology_method()
-        rows = current_data().chronology_summary.loc[
-            (current_data().chronology_summary["group"] == group)
-            & (current_data().chronology_summary["method"] == method)
-        ]
+        summary = current_data().chronology_summary
+        if input.chronology_chart_style() == "Cumulative":
+            rows = summary.loc[
+                summary["group"].eq(group)
+                & (
+                    (summary["event"].eq("lay") & summary["method"].eq("first_observed"))
+                    | (summary["event"].isin(["hatch", "fledge"]) & summary["method"].eq("midpoint"))
+                )
+            ]
+        else:
+            rows = summary.loc[
+                summary["group"].eq(group) & summary["method"].eq(method)
+            ]
         return ui.layout_columns(
             *[
                 ui.value_box(
@@ -1059,6 +1204,10 @@ def server(input, output, session):
         style = input.productivity_chart_style()
         if key == "outcome_png":
             return f"chick_outcomes_{context}.png", figure_bytes(outcome_figure(current_data().chicks))
+        if key == "verification_png":
+            return f"fledge_verification_{context}.png", figure_bytes(verification_figure(current_data().chicks))
+        if key == "rates_by_plot_png":
+            return f"fledging_rates_by_plot_{context}.png", figure_bytes(rate_by_plot_figure(current_data().summary))
         if key == "overview_box_png":
             return f"nest_distributions_{context}.png", figure_bytes(nest_box_figure(current_data().nests))
         if key == "clutch_png":
@@ -1086,6 +1235,7 @@ def server(input, output, session):
             fig = comparison_figure(comparison_data(), input.comparison_chart_style(), labels[metric], metric.endswith("_midpoint"))
             return name, figure_bytes(fig)
         csv_artifacts = {
+            "report_summary_csv": ("report_productivity_summary", productivity_summary_frame()),
             "nests_csv": ("nests", current_data().nests),
             "chicks_csv": ("chicks", current_data().chicks),
             "summary_csv": ("summary", current_data().summary),
@@ -1108,12 +1258,15 @@ def server(input, output, session):
             "Figure or table",
             {
                 "outcome_png": "Chick outcomes (PNG)",
+                "verification_png": "Fledge verification basis (PNG)",
+                "rates_by_plot_png": "Fledging rates by plot (PNG)",
                 "overview_box_png": "Nest distributions (PNG)",
                 "clutch_png": "Clutch size, current view (PNG)",
                 "productivity_png": "Nest productivity, current view (PNG)",
                 "chronology_png": "Chronology, current view (PNG)",
                 "comparison_png": "Comparison, current view (PNG)",
                 "nests_csv": "Nests (CSV)",
+                "report_summary_csv": "Report-style productivity summary (CSV)",
                 "chicks_csv": "Chicks (CSV)",
                 "summary_csv": "Summary (CSV)",
                 "chronology_csv": "Chronology (CSV)",
@@ -1131,7 +1284,8 @@ def server(input, output, session):
     def download_all():
         buffer = BytesIO()
         keys = [
-            "outcome_png", "overview_box_png", "nests_csv", "chicks_csv", "summary_csv",
+            "outcome_png", "verification_png", "rates_by_plot_png", "overview_box_png",
+            "report_summary_csv", "nests_csv", "chicks_csv", "summary_csv",
             "chronology_csv", "banded_csv", "qc_csv",
         ]
         if comparison_data()["group"].nunique() >= 2:

@@ -15,6 +15,7 @@
 .card {
   border: 0;
   box-shadow: 0 2px 12px rgb(22 52 78 / 10%);
+  min-height: min-content;
 }
 
 .callout {
@@ -38,6 +39,7 @@
 .global-controls {
   align-items: center;
   display: flex;
+  flex-wrap: wrap;
   gap: 0.75rem;
   padding-right: 0.75rem;
 }
@@ -45,4 +47,14 @@
 .global-controls .form-group {
   margin: 0;
   min-width: 7rem;
+}
+
+.shiny-plot-output {
+  max-width: 100%;
+}
+
+@media (max-width: 768px) {
+  .global-controls {
+    padding: 0.5rem;
+  }
 }
